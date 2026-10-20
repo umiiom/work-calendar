@@ -2047,13 +2047,34 @@ function flashTitle(msg){
 }
 document.addEventListener('visibilitychange', () => { if(!document.hidden){ clearInterval(titleTimer); document.title = '업무 캘린더'; } });
 
-function systemNotify(title, body, tag, onClick){
-  if('Notification' in window && Notification.permission === 'granted'){
-    try{
-      const n = new Notification(title, {body, tag, requireInteraction: true});
-      n.onclick = () => { if(window.desktop) window.desktop.showWindow(); else window.focus(); onClick && onClick(); n.close(); };
-    }catch(e){}
-  }
+// 서비스 워커로 윈도우 알림 전송 (엣지 앱에서 더 안정적) — 실패하면 기존 방식으로 재시도
+let swReg = null;
+const notifClicks = {};
+if('serviceWorker' in navigator && location.protocol === 'https:'){
+  navigator.serviceWorker.register('sw.js').then(r => { swReg = r; }).catch(e => console.warn('sw', e));
+  navigator.serviceWorker.addEventListener('message', e => {
+    if(e.data && e.data.type === 'notif-click'){ window.focus(); const f = notifClicks[e.data.id]; if(f){ f(); delete notifClicks[e.data.id]; } }
+  });
+}
+let lastNotifError = '', lastNotifWay = '';
+async function systemNotify(title, body, tag, onClick){
+  if(!('Notification' in window)){ lastNotifError = '이 브라우저는 알림을 지원하지 않아요'; return false; }
+  if(Notification.permission !== 'granted'){ lastNotifError = '알림 권한: ' + Notification.permission; return false; }
+  const id = tag || String(Date.now());
+  if(onClick) notifClicks[id] = onClick;
+  try{
+    const reg = swReg || (navigator.serviceWorker && await Promise.race([navigator.serviceWorker.ready, new Promise(r => setTimeout(() => r(null), 3000))]));
+    if(reg && reg.showNotification){
+      await reg.showNotification(title, {body, tag: id, requireInteraction: true, icon: 'icon-192.png', data: {id}});
+      lastNotifError = ''; lastNotifWay = '서비스워커'; return true;
+    }
+  }catch(e){ lastNotifError = '서비스워커: ' + (e && e.message || e); }
+  try{
+    const n = new Notification(title, {body, tag: id, requireInteraction: true, icon: 'icon-192.png'});
+    n.onclick = () => { if(window.desktop) window.desktop.showWindow(); else window.focus(); onClick && onClick(); n.close(); };
+    n.onerror = () => { lastNotifError = '윈도우가 알림을 거부했어요'; };
+    lastNotifError = ''; lastNotifWay = '기본'; return true;
+  }catch(e){ lastNotifError = (lastNotifError ? lastNotifError + ' / ' : '') + (e && e.message || e); return false; }
 }
 
 // ev: 인스턴스(date 포함), a: 알림 설정, prefix: '(놓친 알림)' 등
@@ -2195,6 +2216,13 @@ $('importFile').onchange = e => {
 $('testBtn').onclick = () => {
   maybeAskPermission();
   notify({id:'test', baseId:'test', type:'sponsor', title:'알림 테스트', date:todayKey(), time:'', memo:'알림이 잘 오고 있어요! 아래 버튼으로 다시 알림도 테스트해 보세요.'}, null, '');
+  setTimeout(() => {
+    const perm = ('Notification' in window) ? Notification.permission : '없음';
+    const msg = lastNotifError
+      ? `윈도우 알림 보내기 실패 · ${lastNotifError}`
+      : `윈도우 알림 보냄 (${lastNotifWay||'?'} 방식 · 권한 ${perm} · 서비스워커 ${swReg?'켜짐':'없음'})\n화면 오른쪽 아래(주 모니터)를 확인해 보세요.`;
+    toast('🔎 알림 진단', msg, 'etc');
+  }, 1500);
 };
 
 /* ================= 시작 ================= */
